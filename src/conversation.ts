@@ -17,7 +17,18 @@ export type ChatMessage = {
 interface Attachment {
   name: string;
   color: string;
+  ip: string;
 }
+
+// Tope de mensajes por sala (ring buffer): al pasarlo se borran los más viejos.
+// Acota el storage del DO (y su coste), defiende del llenado por abuso y hace
+// que una sala pública sea "efímera de verdad".
+const MAX_MESSAGES = 5000;
+
+// Rate-limit por IP (token bucket): ráfaga de hasta RL_BURST, reponiendo
+// RL_REFILL_PER_SEC por segundo.
+const RL_BURST = 12;
+const RL_REFILL_PER_SEC = 1;
 
 // Color admitido = hex (#rgb / #rrggbb) o hsl(h, s%, l%). Validar en el
 // servidor evita difundir algo que el cliente meta luego en un `style` y
@@ -65,6 +76,10 @@ const JOIN_WINDOW_MS = 5 * 60 * 1000;
  * siguen conectados, así no se acumulan cargos de Duration mientras está idle.
  */
 export class ConversationDO extends DurableObject<Env> {
+  // Token bucket por IP, en memoria (se reinicia con la hibernación; basta para
+  // frenar una ráfaga, que de todos modos mantiene el DO despierto).
+  private buckets = new Map<string, { tokens: number; last: number }>();
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
@@ -103,6 +118,7 @@ export class ConversationDO extends DurableObject<Env> {
     const url = new URL(request.url);
     const name = (url.searchParams.get("name") || "anon").slice(0, 25) || "anon";
     const color = cleanColor(url.searchParams.get("color")) ?? defaultColor(name);
+    const ip = request.headers.get("CF-Connecting-IP") || "local";
 
     // Registra la conexión (fija el color solo la primera vez) y decide si toca
     // anunciarla.
@@ -110,7 +126,7 @@ export class ConversationDO extends DurableObject<Env> {
 
     const { 0: client, 1: server } = new WebSocketPair();
     this.ctx.acceptWebSocket(server); // hibernable
-    server.serializeAttachment({ name, color } satisfies Attachment);
+    server.serializeAttachment({ name, color, ip } satisfies Attachment);
 
     // Historial + colores actuales → el cliente pinta la sala con cada nombre
     // en su color, también los mensajes antiguos.
@@ -137,6 +153,11 @@ export class ConversationDO extends DurableObject<Env> {
 
     const att = ws.deserializeAttachment() as Attachment | null;
     const name = att?.name ?? "anon";
+    const ip = att?.ip ?? "local";
+
+    // Rate-limit por IP: si va por encima del presupuesto, descartamos en
+    // silencio (vale tanto para mensajes como para cambios de color).
+    if (!this.allow(ip)) return;
 
     // Cambio de color: persiste el perfil y lo difunde para que TODOS recoloreen
     // los mensajes de esta persona (incluido el historial ya pintado).
@@ -155,7 +176,7 @@ export class ConversationDO extends DurableObject<Env> {
         name,
         color,
       );
-      ws.serializeAttachment({ name, color } satisfies Attachment);
+      ws.serializeAttachment({ name, color, ip } satisfies Attachment);
       this.broadcast(JSON.stringify({ type: "color", name, color }));
       return;
     }
@@ -214,7 +235,25 @@ export class ConversationDO extends DurableObject<Env> {
         kind,
       )
       .one();
+    // Ring buffer: conservamos solo los últimos MAX_MESSAGES (no-op mientras la
+    // sala sea más corta que el tope).
+    this.ctx.storage.sql.exec("DELETE FROM messages WHERE seq <= ?", row.seq - MAX_MESSAGES);
     this.broadcast(JSON.stringify({ type: "msg", seq: row.seq, author, body, ts, kind }));
+  }
+
+  // Token bucket por IP: true si la acción cabe en el presupuesto.
+  private allow(ip: string): boolean {
+    const now = Date.now();
+    let b = this.buckets.get(ip);
+    if (!b) {
+      b = { tokens: RL_BURST, last: now };
+      this.buckets.set(ip, b);
+    }
+    b.tokens = Math.min(RL_BURST, b.tokens + ((now - b.last) / 1000) * RL_REFILL_PER_SEC);
+    b.last = now;
+    if (b.tokens < 1) return false;
+    b.tokens -= 1;
+    return true;
   }
 
   private system(author: string, body: string): void {
