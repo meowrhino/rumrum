@@ -4,23 +4,61 @@ import type { Env } from "./index";
 // Un mensaje tal y como viaja al cliente y como se guarda en SQLite.
 // `type` (no `interface`) para que tenga índice de string implícito y
 // satisfaga el genérico de sql.exec<T> (Record<string, SqlStorageValue>).
+// `kind`: 'user' (lo escribe alguien) | 'system' (lo genera la sala: conexiones).
 export type ChatMessage = {
   seq: number;
   author: string;
   body: string;
   ts: number;
+  kind: string;
 };
 
 // Estado que sobrevive a la hibernación, atado a cada conexión (máx 16 KB).
 interface Attachment {
   name: string;
+  color: string;
 }
+
+// Color admitido = hex (#rgb / #rrggbb) o hsl(h, s%, l%). Validar en el
+// servidor evita difundir algo que el cliente meta luego en un `style` y
+// pueda colar CSS arbitrario.
+const HEX = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
+const HSL = /^hsl\(\s*\d{1,3}\s*,\s*\d{1,3}%\s*,\s*\d{1,3}%\s*\)$/i;
+function cleanColor(c: unknown): string | null {
+  if (typeof c !== "string") return null;
+  const s = c.trim();
+  if (s.length > 30) return null;
+  return HEX.test(s) || HSL.test(s) ? s : null;
+}
+
+// Color por defecto determinista (mismo algoritmo y formato hex que el cliente
+// en util.js) para quien aún no ha elegido uno.
+function defaultColor(name: string): string {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) % 360;
+  return hslToHex(h, 55, 70);
+}
+function hslToHex(h: number, s: number, l: number): string {
+  s /= 100;
+  l /= 100;
+  const a = s * Math.min(l, 1 - l);
+  const f = (n: number) => {
+    const k = (n + h / 30) % 12;
+    const c = l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+    return Math.round(255 * c).toString(16).padStart(2, "0");
+  };
+  return `#${f(0)}${f(8)}${f(4)}`;
+}
+
+// Reanunciamos "se ha conectado" como mucho una vez por persona cada ventana:
+// así un refresco / caída de red / segunda pestaña no llena la sala de avisos.
+const JOIN_WINDOW_MS = 5 * 60 * 1000;
 
 /**
  * ConversationDO — el MOTOR. Una instancia por conversación (sala en rumrum,
  * 1:1 o grupo en toctoc). Es agnóstico al producto: solo sabe de mensajes,
- * orden y fan-out en tiempo real. La identidad/cuentas/membresía viven fuera
- * (en el Worker + D1), no aquí.
+ * orden, perfiles (color) y fan-out en tiempo real. La identidad/cuentas/
+ * membresía viven fuera (en el Worker), no aquí.
  *
  * Realtime vía WebSocket Hibernation API (`acceptWebSocket`, no `ws.accept()`):
  * el DO se desaloja de memoria cuando no hay actividad pero los clientes
@@ -29,14 +67,28 @@ interface Attachment {
 export class ConversationDO extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    // Esquema: solo se ejecuta el CREATE; barato y idempotente.
     ctx.blockConcurrencyWhile(async () => {
-      this.ctx.storage.sql.exec(`
+      const sql = this.ctx.storage.sql;
+      sql.exec(`
         CREATE TABLE IF NOT EXISTS messages (
           seq    INTEGER PRIMARY KEY AUTOINCREMENT,
           author TEXT    NOT NULL,
           body   TEXT    NOT NULL,
-          ts     INTEGER NOT NULL
+          ts     INTEGER NOT NULL,
+          kind   TEXT    NOT NULL DEFAULT 'user'
+        );
+      `);
+      // Migración para salas creadas con el esquema v0 (sin columna `kind`).
+      try {
+        sql.exec("ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'user'");
+      } catch {
+        // la columna ya existe → nada que hacer
+      }
+      sql.exec(`
+        CREATE TABLE IF NOT EXISTS profiles (
+          name       TEXT    PRIMARY KEY,
+          color      TEXT    NOT NULL,
+          lastJoinTs INTEGER NOT NULL DEFAULT 0
         );
       `);
     });
@@ -50,58 +102,69 @@ export class ConversationDO extends DurableObject<Env> {
 
     const url = new URL(request.url);
     const name = (url.searchParams.get("name") || "anon").slice(0, 25) || "anon";
+    const color = cleanColor(url.searchParams.get("color")) ?? defaultColor(name);
+
+    // Registra la conexión (fija el color solo la primera vez) y decide si toca
+    // anunciarla.
+    const announce = this.touchProfile(name, color);
 
     const { 0: client, 1: server } = new WebSocketPair();
-    // acceptWebSocket (no ws.accept) → la conexión es hibernable.
-    this.ctx.acceptWebSocket(server);
-    server.serializeAttachment({ name } satisfies Attachment);
+    this.ctx.acceptWebSocket(server); // hibernable
+    server.serializeAttachment({ name, color } satisfies Attachment);
 
-    // Al conectar, mandamos el historial reciente para pintar la sala.
-    server.send(JSON.stringify({ type: "history", messages: this.recent(50) }));
+    // Historial + colores actuales → el cliente pinta la sala con cada nombre
+    // en su color, también los mensajes antiguos.
+    server.send(
+      JSON.stringify({ type: "history", messages: this.recent(50), profiles: this.profiles() }),
+    );
+
+    // El aviso de conexión se persiste como mensaje de sistema: aparece en vivo
+    // y queda en el historial para quien entre después.
+    if (announce) this.system(name, "se ha conectado");
 
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  // Llega un mensaje de un cliente: persiste y reparte a todos los conectados.
+  // Llega algo de un cliente: o cambia su color, o es un mensaje normal.
   async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer): Promise<void> {
     if (typeof raw !== "string") return;
-    let data: { type?: string; body?: unknown };
+    let data: { type?: string; body?: unknown; color?: unknown };
     try {
       data = JSON.parse(raw);
     } catch {
       return;
     }
-    if (data.type !== "msg" || typeof data.body !== "string") return;
 
+    const att = ws.deserializeAttachment() as Attachment | null;
+    const name = att?.name ?? "anon";
+
+    // Cambio de color: persiste el perfil y lo difunde para que TODOS recoloreen
+    // los mensajes de esta persona (incluido el historial ya pintado).
+    if (data.type === "color") {
+      const color = cleanColor(data.color);
+      if (!color) return;
+      // No-op: si ya tiene ese color, ni escribimos ni difundimos (un picker
+      // dispara muchos valores intermedios al arrastrar; no inundamos la sala).
+      const cur = this.ctx.storage.sql
+        .exec<{ color: string }>("SELECT color FROM profiles WHERE name = ?", name)
+        .toArray();
+      if (cur.length && cur[0].color === color) return;
+      this.ctx.storage.sql.exec(
+        `INSERT INTO profiles (name, color, lastJoinTs) VALUES (?, ?, 0)
+         ON CONFLICT(name) DO UPDATE SET color = excluded.color`,
+        name,
+        color,
+      );
+      ws.serializeAttachment({ name, color } satisfies Attachment);
+      this.broadcast(JSON.stringify({ type: "color", name, color }));
+      return;
+    }
+
+    if (data.type !== "msg" || typeof data.body !== "string") return;
     const body = data.body.trim().slice(0, 1000);
     if (!body) return;
 
-    const att = ws.deserializeAttachment() as Attachment | null;
-    const author = att?.name ?? "anon";
-    const ts = Date.now();
-
-    // Persist first: el rowid autoincremental nos da orden total gratis.
-    const row = this.ctx.storage.sql
-      .exec<{ seq: number }>(
-        "INSERT INTO messages (author, body, ts) VALUES (?, ?, ?) RETURNING seq",
-        author,
-        body,
-        ts,
-      )
-      .one();
-
-    const msg: ChatMessage = { seq: row.seq, author, body, ts };
-    const blob = JSON.stringify({ type: "msg", ...msg });
-
-    // Broadcast a todas las conexiones vivas (sobrevive a hibernación: el
-    // runtime mantiene la lista, no necesitamos un Map en memoria).
-    for (const peer of this.ctx.getWebSockets()) {
-      try {
-        peer.send(blob);
-      } catch {
-        // peer muerto; el cierre lo limpia.
-      }
-    }
+    this.append(name, body, "user");
   }
 
   async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
@@ -112,11 +175,78 @@ export class ConversationDO extends DurableObject<Env> {
     }
   }
 
+  // --- helpers -------------------------------------------------------------
+
+  // Registra la conexión y decide si anunciarla (fuera de la ventana). El color
+  // SOLO se fija al crear el perfil (fila nueva); en reconexiones NO se toca,
+  // para no pisar el color elegido con el del query-param (que sería el por
+  // defecto al entrar desde otro dispositivo o sin localStorage). El color solo
+  // cambia luego vía el mensaje explícito {type:"color"}, que sí se difunde.
+  // `lastJoinTs` solo avanza cuando SÍ anunciamos, así la ventana se mide desde
+  // el último aviso y no se reinicia con cada reconexión.
+  private touchProfile(name: string, color: string): boolean {
+    const now = Date.now();
+    const prev = this.ctx.storage.sql
+      .exec<{ lastJoinTs: number }>("SELECT lastJoinTs FROM profiles WHERE name = ?", name)
+      .toArray();
+    const announce = prev.length === 0 || now - prev[0].lastJoinTs > JOIN_WINDOW_MS;
+    this.ctx.storage.sql.exec(
+      `INSERT INTO profiles (name, color, lastJoinTs) VALUES (?, ?, ?)
+       ON CONFLICT(name) DO UPDATE SET
+         lastJoinTs = CASE WHEN ? = 1 THEN excluded.lastJoinTs ELSE profiles.lastJoinTs END`,
+      name,
+      color,
+      announce ? now : 0,
+      announce ? 1 : 0,
+    );
+    return announce;
+  }
+
+  // Inserta un mensaje (user/system) y lo reparte a todos los conectados.
+  private append(author: string, body: string, kind: "user" | "system"): void {
+    const ts = Date.now();
+    const row = this.ctx.storage.sql
+      .exec<{ seq: number }>(
+        "INSERT INTO messages (author, body, ts, kind) VALUES (?, ?, ?, ?) RETURNING seq",
+        author,
+        body,
+        ts,
+        kind,
+      )
+      .one();
+    this.broadcast(JSON.stringify({ type: "msg", seq: row.seq, author, body, ts, kind }));
+  }
+
+  private system(author: string, body: string): void {
+    this.append(author, body, "system");
+  }
+
+  private broadcast(blob: string): void {
+    for (const peer of this.ctx.getWebSockets()) {
+      try {
+        peer.send(blob);
+      } catch {
+        // peer muerto; el cierre lo limpia
+      }
+    }
+  }
+
+  // Mapa nombre → color para el snapshot inicial.
+  private profiles(): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const p of this.ctx.storage.sql
+      .exec<{ name: string; color: string }>("SELECT name, color FROM profiles")
+      .toArray()) {
+      out[p.name] = p.color;
+    }
+    return out;
+  }
+
   // Últimos `limit` mensajes en orden cronológico ascendente.
   private recent(limit: number): ChatMessage[] {
     return this.ctx.storage.sql
       .exec<ChatMessage>(
-        "SELECT seq, author, body, ts FROM messages ORDER BY seq DESC LIMIT ?",
+        "SELECT seq, author, body, ts, kind FROM messages ORDER BY seq DESC LIMIT ?",
         limit,
       )
       .toArray()

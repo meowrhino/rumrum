@@ -1,5 +1,8 @@
 // Identidad minimal del cliente. En rumrum el nombre es anónimo y local (no hay
 // cuentas — eso es toctoc): se recuerda en localStorage y se pregunta una vez.
+// El color también es local en este dispositivo, pero se sincroniza a la sala
+// (el resto lo ve) vía el perfil que guarda el DO.
+import { colorFor } from "./util.js";
 
 export function getRoom() {
   const params = new URLSearchParams(location.search);
@@ -13,4 +16,13 @@ export function getName() {
     localStorage.setItem("rumrum_name", name);
   }
   return name;
+}
+
+// Color elegido (hex) o, si nunca eligió, el determinista por nombre.
+export function getColor() {
+  return localStorage.getItem("rumrum_color") || colorFor(getName());
+}
+
+export function setColor(color) {
+  localStorage.setItem("rumrum_color", color);
 }

@@ -123,3 +123,41 @@ header .meta b { color: var(--text-dim); font-weight: 500; }
   cursor: pointer;
 }
 #composer button:hover { background: var(--accent-dim); }
+
+/* selector de color propio: un cuadradito a la derecha de la cabecera */
+.swatch {
+  margin-left: auto;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  align-self: center;
+}
+.swatch::-webkit-color-swatch-wrapper { padding: 2px; }
+.swatch::-webkit-color-swatch { border: none; border-radius: 2px; }
+.swatch::-moz-color-swatch { border: none; border-radius: 2px; }
+
+/* separador de día: la etiqueta centrada entre dos hilos */
+.daysep {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  margin: .55rem 0;
+  color: var(--muted);
+  font-size: .7rem;
+  text-transform: lowercase;
+}
+.daysep::before,
+.daysep::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--hairline);
+}
+
+/* aviso de conexión (mensaje de sistema) */
+.msg.system { color: var(--muted); font-style: italic; }
+.msg.system .sys { margin-left: .1rem; }
