@@ -4,6 +4,7 @@ import { $ } from "./util.js";
 import { getRoom, getName, getColor, setColor } from "./session.js";
 import { connectRoom } from "./ws.js";
 import { addMessage, renderHistory, applyColor, setOnline } from "./render.js";
+import * as alerts from "./alerts.js";
 
 const room = getRoom();
 const name = getName();
@@ -16,6 +17,8 @@ $("#me").style.color = color;
 const picker = $("#mycolor");
 picker.value = color;
 
+alerts.setup({ emoji: "💬", base: "rumrum" });
+
 const conn = connectRoom({
   room,
   name,
@@ -24,7 +27,11 @@ const conn = connectRoom({
     renderHistory(messages, profiles);
     setOnline(online);
   },
-  onMessage: addMessage,
+  onMessage: (m) => {
+    addMessage(m);
+    // sonido/badge/notificación solo para mensajes de OTRA persona
+    if (m.kind !== "system" && m.author !== name) alerts.incoming(m.author, m.body);
+  },
   onColor: ({ name, color }) => applyColor(name, color),
   onPresence: setOnline,
 });
@@ -52,6 +59,7 @@ $("#composer").addEventListener("submit", (e) => {
   const input = $("#body");
   const body = input.value.trim();
   if (!body) return;
+  alerts.askNotifPermission(); // gesto del usuario → buen momento para pedir permiso
   conn.send(body);
   input.value = "";
 });

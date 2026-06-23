@@ -4,7 +4,7 @@
 //
 // Estrategia: stale-while-revalidate del shell (sirve cache al momento y
 // actualiza en segundo plano). Sube la versión del CACHE al cambiar el shell.
-const CACHE = "rumrum-v1";
+const CACHE = "rumrum-v2";
 const SHELL = [
   "/",
   "/style.css",
@@ -13,6 +13,7 @@ const SHELL = [
   "/js/session.js",
   "/js/ws.js",
   "/js/render.js",
+  "/js/alerts.js",
   "/manifest.webmanifest",
   "/icon.svg",
   "/icon-192.png",

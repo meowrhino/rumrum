@@ -1,4 +1,4 @@
-import { $, colorFor, hhmm, dayKey, dayLabel } from "./util.js";
+import { $, colorFor, hhmm, dayKey, dayLabel, linkifyInto } from "./util.js";
 
 // Pinta la sala estilo Chatango: filas densas "HH:MM nombre mensaje", con el
 // nombre en su color (el elegido por esa persona, o el determinista por
@@ -85,7 +85,7 @@ export function addMessage(m) {
 
     const body = document.createElement("span");
     body.className = "body";
-    body.textContent = m.body;
+    linkifyInto(body, m.body);
 
     li.append(time, name, body);
   }
