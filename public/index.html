@@ -5,82 +5,25 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>rumrum</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💬</text></svg>" />
-  <style>
-    :root {
-      --bg: #1e1e1e;
-      --fg: #d4d4d4;
-      --muted: #808080;
-      --accent: #569cd6;
-      --line: #333;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-      background: var(--bg);
-      color: var(--fg);
-      display: flex;
-      flex-direction: column;
-      height: 100vh;
-    }
-    header {
-      padding: .6rem 1rem;
-      border-bottom: 1px solid var(--line);
-      display: flex;
-      gap: 1rem;
-      align-items: baseline;
-    }
-    header h1 { margin: 0; font-size: 1rem; color: var(--accent); }
-    header .meta { color: var(--muted); font-size: .8rem; }
-    #messages {
-      flex: 1;
-      overflow-y: auto;
-      list-style: none;
-      margin: 0;
-      padding: 1rem;
-    }
-    #messages li { margin: 0 0 .35rem; word-break: break-word; }
-    #messages b { color: var(--accent); margin-right: .4rem; }
-    #composer {
-      display: flex;
-      gap: .5rem;
-      padding: .75rem 1rem;
-      border-top: 1px solid var(--line);
-    }
-    #body {
-      flex: 1;
-      background: #2a2a2a;
-      border: 1px solid var(--line);
-      color: var(--fg);
-      font: inherit;
-      padding: .5rem;
-      border-radius: 4px;
-    }
-    #composer button {
-      background: var(--accent);
-      color: #fff;
-      border: 0;
-      padding: 0 1rem;
-      border-radius: 4px;
-      cursor: pointer;
-      font: inherit;
-    }
-  </style>
+  <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
-  <header>
-    <h1>rumrum</h1>
-    <span class="meta">sala <b id="room"></b></span>
-    <span class="meta">tú: <b id="me"></b></span>
-  </header>
+  <!-- caja de chat compacta, estilo Chatango embebible -->
+  <div class="chatbox">
+    <header>
+      <h1>rumrum</h1>
+      <span class="meta">sala <b id="room"></b></span>
+      <span class="meta">tú: <b id="me"></b></span>
+    </header>
 
-  <ul id="messages"></ul>
+    <ul id="messages"></ul>
 
-  <form id="composer" autocomplete="off">
-    <input id="body" type="text" placeholder="escribe algo…" maxlength="1000" />
-    <button type="submit">enviar</button>
-  </form>
+    <form id="composer" autocomplete="off">
+      <input id="body" type="text" placeholder="escribe algo…" maxlength="1000" />
+      <button type="submit">piu</button>
+    </form>
+  </div>
 
-  <script src="/app.js"></script>
+  <script type="module" src="/js/main.js"></script>
 </body>
 </html>
