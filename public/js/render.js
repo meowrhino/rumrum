@@ -10,8 +10,37 @@ const list = () => $("#messages");
 
 let colors = {}; // nombre → color elegido (snapshot del DO + cambios en vivo)
 let lastDay = null; // dayKey del último mensaje pintado, para los separadores
+let online = []; // nombres conectados ahora mismo (para la leyenda de presencia)
 
 const colorOf = (name) => colors[name] || colorFor(name);
+
+// Leyenda "quién está en línea": un puntito del color de cada quien + su nombre.
+export function setOnline(list) {
+  online = list || [];
+  paintPresence();
+}
+
+function paintPresence() {
+  const box = $("#presence");
+  if (!box) return;
+  box.innerHTML = "";
+  const n = online.length;
+  const label = document.createElement("span");
+  label.className = "presence-label";
+  label.textContent = n === 1 ? "1 en línea" : `${n} en línea`;
+  box.appendChild(label);
+  for (const name of online) {
+    const chip = document.createElement("span");
+    chip.className = "presence-chip";
+    const dot = document.createElement("span");
+    dot.className = "presence-dot";
+    dot.style.background = colorOf(name);
+    const nm = document.createElement("span");
+    nm.textContent = name;
+    chip.append(dot, nm);
+    box.appendChild(chip);
+  }
+}
 
 // Si este mensaje cae en un día distinto al anterior, mete un separador.
 function daySeparatorIfNeeded(ts) {
@@ -83,4 +112,5 @@ export function applyColor(name, color) {
       if (el) el.style.color = color;
     }
   }
+  paintPresence(); // recolorea también el puntito de la leyenda
 }

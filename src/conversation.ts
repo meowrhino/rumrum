@@ -65,6 +65,10 @@ function hslToHex(h: number, s: number, l: number): string {
 // así un refresco / caída de red / segunda pestaña no llena la sala de avisos.
 const JOIN_WINDOW_MS = 5 * 60 * 1000;
 
+// Gracia antes de anunciar "se ha desconectado": absorbe reconexiones por caídas
+// breves de red (el cliente reconecta solo en ~1s) para no spamear entrar/salir.
+const LEAVE_GRACE_MS = 12 * 1000;
+
 /**
  * ConversationDO — el MOTOR. Una instancia por conversación (sala en rumrum,
  * 1:1 o grupo en toctoc). Es agnóstico al producto: solo sabe de mensajes,
@@ -106,6 +110,13 @@ export class ConversationDO extends DurableObject<Env> {
           lastJoinTs INTEGER NOT NULL DEFAULT 0
         );
       `);
+      // Salidas pendientes de anunciar (con gracia): name → cuándo toca avisar.
+      sql.exec(`
+        CREATE TABLE IF NOT EXISTS pending_leave (
+          name    TEXT    PRIMARY KEY,
+          leaveAt INTEGER NOT NULL
+        );
+      `);
     });
   }
 
@@ -123,20 +134,34 @@ export class ConversationDO extends DurableObject<Env> {
     // Registra la conexión (fija el color solo la primera vez) y decide si toca
     // anunciarla.
     const announce = this.touchProfile(name, color);
+    // Si vuelve antes de expirar la gracia, cancela su "se ha desconectado".
+    this.ctx.storage.sql.exec("DELETE FROM pending_leave WHERE name = ?", name);
 
     const { 0: client, 1: server } = new WebSocketPair();
     this.ctx.acceptWebSocket(server); // hibernable
     server.serializeAttachment({ name, color, ip } satisfies Attachment);
 
-    // Historial + colores actuales → el cliente pinta la sala con cada nombre
-    // en su color, también los mensajes antiguos.
+    // Historial + colores + quién está en línea → el cliente pinta la sala con
+    // cada nombre en su color y muestra la presencia.
     server.send(
-      JSON.stringify({ type: "history", messages: this.recent(50), profiles: this.profiles() }),
+      JSON.stringify({
+        type: "history",
+        messages: this.recent(50),
+        profiles: this.profiles(),
+        online: this.onlineNames(),
+      }),
     );
 
     // El aviso de conexión se persiste como mensaje de sistema: aparece en vivo
     // y queda en el historial para quien entre después.
     if (announce) this.system(name, "se ha conectado");
+    // Difunde el color REAL de quien entra (es "sticky": puede no ser el del
+    // query-param) para que los ya conectados lo pinten bien al instante.
+    const stored = this.ctx.storage.sql
+      .exec<{ color: string }>("SELECT color FROM profiles WHERE name = ?", name)
+      .toArray();
+    this.broadcast(JSON.stringify({ type: "color", name, color: stored[0]?.color ?? color }));
+    this.broadcastPresence();
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -194,9 +219,69 @@ export class ConversationDO extends DurableObject<Env> {
     } catch {
       // ya cerrado
     }
+    const att = ws.deserializeAttachment() as Attachment | null;
+    const name = att?.name;
+    // Si era su última conexión, programa el aviso de salida con gracia.
+    if (name && !this.hasOtherSocket(ws, name)) {
+      const leaveAt = Date.now() + LEAVE_GRACE_MS;
+      this.ctx.storage.sql.exec(
+        "INSERT INTO pending_leave (name, leaveAt) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET leaveAt = excluded.leaveAt",
+        name,
+        leaveAt,
+      );
+      await this.scheduleAlarm(leaveAt);
+    }
+    this.broadcastPresence(ws); // la presencia (lista) se actualiza al instante
+  }
+
+  // Vence la gracia: anuncia a quien siga sin conexión y reprograma si quedan.
+  async alarm(): Promise<void> {
+    const now = Date.now();
+    const due = this.ctx.storage.sql
+      .exec<{ name: string }>("SELECT name FROM pending_leave WHERE leaveAt <= ?", now)
+      .toArray();
+    for (const { name } of due) {
+      this.ctx.storage.sql.exec("DELETE FROM pending_leave WHERE name = ?", name);
+      if (!this.onlineNames().includes(name)) this.system(name, "se ha desconectado");
+    }
+    const next = this.ctx.storage.sql
+      .exec<{ m: number | null }>("SELECT MIN(leaveAt) AS m FROM pending_leave")
+      .toArray();
+    if (next[0]?.m) await this.ctx.storage.setAlarm(next[0].m);
   }
 
   // --- helpers -------------------------------------------------------------
+
+  // Nombres únicos actualmente conectados (opcionalmente excluyendo un socket
+  // que se está cerrando, cuyo cierre aún no se ha propagado a getWebSockets).
+  private onlineNames(exclude?: WebSocket): string[] {
+    const set = new Set<string>();
+    for (const ws of this.ctx.getWebSockets()) {
+      if (ws === exclude) continue;
+      const att = ws.deserializeAttachment() as Attachment | null;
+      if (att?.name) set.add(att.name);
+    }
+    return [...set];
+  }
+
+  private hasOtherSocket(self: WebSocket, name: string): boolean {
+    for (const ws of this.ctx.getWebSockets()) {
+      if (ws === self) continue;
+      const att = ws.deserializeAttachment() as Attachment | null;
+      if (att?.name === name) return true;
+    }
+    return false;
+  }
+
+  private broadcastPresence(exclude?: WebSocket): void {
+    this.broadcast(JSON.stringify({ type: "presence", online: this.onlineNames(exclude) }));
+  }
+
+  // Programa la alarma solo si no hay una anterior (mantiene la más próxima).
+  private async scheduleAlarm(t: number): Promise<void> {
+    const cur = await this.ctx.storage.getAlarm();
+    if (cur === null || t < cur) await this.ctx.storage.setAlarm(t);
+  }
 
   // Registra la conexión y decide si anunciarla (fuera de la ventana). El color
   // SOLO se fija al crear el perfil (fila nueva); en reconexiones NO se toca,

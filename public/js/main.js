@@ -3,7 +3,7 @@
 import { $ } from "./util.js";
 import { getRoom, getName, getColor, setColor } from "./session.js";
 import { connectRoom } from "./ws.js";
-import { addMessage, renderHistory, applyColor } from "./render.js";
+import { addMessage, renderHistory, applyColor, setOnline } from "./render.js";
 
 const room = getRoom();
 const name = getName();
@@ -20,9 +20,13 @@ const conn = connectRoom({
   room,
   name,
   color,
-  onHistory: renderHistory,
+  onHistory: (messages, profiles, online) => {
+    renderHistory(messages, profiles);
+    setOnline(online);
+  },
   onMessage: addMessage,
   onColor: ({ name, color }) => applyColor(name, color),
+  onPresence: setOnline,
 });
 
 // Mientras arrastro el selector (`input` dispara en cada tic): recoloreo mi

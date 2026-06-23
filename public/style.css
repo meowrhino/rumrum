@@ -75,6 +75,29 @@ header h1 { margin: 0; font-size: .95rem; font-weight: 600; color: var(--accent)
 header .meta { font-size: .72rem; color: var(--muted); }
 header .meta b { color: var(--text-dim); font-weight: 500; }
 
+/* barra de presencia: quién está en línea (puntito de color + nombre) */
+.presence {
+  display: flex;
+  align-items: center;
+  gap: .55rem;
+  padding: .35rem .8rem;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--bg);
+  font-size: .72rem;
+  color: var(--muted);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.presence-label { flex-shrink: 0; }
+.presence-chip { display: inline-flex; align-items: center; gap: .3rem; color: var(--text-dim); }
+.presence-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  box-shadow: 0 0 4px currentColor;
+}
+
 /* mensajes: filas densas, una por línea — el look "chatbox" de Chatango */
 #messages {
   flex: 1;
